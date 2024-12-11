@@ -11,6 +11,7 @@ The Facial Recognition Attendance Management System is a Python-based applicatio
 - **Face Recognition**: Recognize students in real-time using webcam input.
 - **Attendance Recording**: Store attendance records in a MySQL database and save them in subject-specific CSV files.
 - **Duplicate Handling**: Manage duplicate entries in the database by updating existing records instead of inserting new ones.
+- **Manual Attendance**: Allow users to manually enter student IDs and names to record attendance without facial recognition.
 
 ## Requirements
 
@@ -46,7 +47,7 @@ Each folder should contain images of the respective student.
 1) Open a terminal or command prompt.
 Navigate to the project directory and run:
    ```bash
-   python attendance_system.py
+   python main_Run.py
    ```
 2) Capture Images:
 When prompted, enter the enrollment ID and name of the student to capture their images.
