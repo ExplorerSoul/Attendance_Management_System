@@ -29,29 +29,34 @@ The Facial Recognition Attendance Management System is a Python-based applicatio
 
    ```bash
    git clone <https://github.com/ExplorerSoul/Attendance_Management_System>
-Install the required libraries:
-bash
-pip install opencv-python dlib face_recognition mysql-connector-python numpy pandas
-Set up your MySQL database:
-Create a database named attendance_management_system.
+## Install the required libraries:
+   ```bash
+   pip install opencv-python dlib face_recognition mysql-connector-python numpy pandas
+   ```
+### Set up your MySQL database:
+# Create a database named attendance_management_system.
 Create the necessary tables (users and attendance) with appropriate fields.
-Usage
+
+### Usage
 Prepare Training Data:
 Place student images in the TrainingImages folder, organized by student ID (e.g., folders named 1, 2, etc.).
 Each folder should contain images of the respective student.
-Run the Application:
-Open a terminal or command prompt.
+
+## Run the Application:
+1) Open a terminal or command prompt.
 Navigate to the project directory and run:
-bash
-python attendance_system.py
-Capture Images:
+   ```bash
+   python attendance_system.py
+   ```
+2) Capture Images:
 When prompted, enter the enrollment ID and name of the student to capture their images.
 The application will capture up to 140 images for each student.
-Take Attendance:
+3) Take Attendance:
 When prompted, enter the subject name for attendance.
+
 The application will start recognizing faces from the webcam feed and log attendance accordingly.
-Viewing Attendance Records:
+4) Viewing Attendance Records:
 Attendance records are saved in CSV files located in the attendance folder, named according to the subject (e.g., attendance_math.csv).
-Troubleshooting
+### Troubleshooting
 If you encounter issues with unsupported image types, ensure that all images are in JPEG or PNG format.
 If you experience performance issues with the camera, ensure that no other applications are using the webcam simultaneously.
