@@ -1,0 +1,6 @@
+dlib==19.22.0  # Version may vary; check compatibility with your code
+numpy==1.19.5  # Adjust based on compatibility with dlib and OpenCV
+opencv-python==4.5.3.20210927  # Specify a stable version
+Pillow==8.4.0  # For image processing
+pandas==1.3.3  # For handling CSV and data manipulation
+sqlite3  # This is included in the Python standard library, no need to install separately
