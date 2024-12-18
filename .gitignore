@@ -3,3 +3,4 @@ media/
 requirements/
 dlib/
 web server/
+data/data_faces_from_camera
