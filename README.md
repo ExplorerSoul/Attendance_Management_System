@@ -22,41 +22,40 @@ This project implements a facial recognition attendance system using Python. It 
 To set up this project locally, follow these steps:
 
 1. **Clone the Repository**:
-git clone https://github.com/yourusername/attendance-system.git
-cd attendance-system
+**`git clone https://github.com/yourusername/attendance-system.git`**
+**`cd attendance-system`**
 
 
 2. **Create a Virtual Environment (Optional but Recommended)**:
-python -m venv venv
-source venv/bin/activate # On Windows use venv\Scripts\activate
+`python -m venv env_name`
+`source venv/bin/activate` # On Windows use `venv\Scripts\activate`
 
 
 3. **Install Required Packages**:
 Install the required packages using the provided `requirements.txt` file:
-
-pip install -r requirements.txt
+`pip install -r requirements.txt`
 
 
 4. **Install Dlib**:
 If you are using Windows, you may need to install Dlib from the provided `.whl` files in the `resources` directory. Use the following command:
-pip install resources/dlib-<version>.whl # Replace <version> with the actual file name
+`pip install resources/dlib-<version>.whl` # Replace <version> with the actual file name
 
 
 ## Usage
 
 1. **Register New Faces**:
 Run `main.py` to start registering new faces.
-python main.py
+**`python main.py`**
 
 
 2. **Take Attendance**:
 After registering faces, run `attendance_taker.py` to recognize faces and log attendance.
-python attendance_taker.py
+***`python attendance_taker.py`***
 
 
 3. **View Attendance Records**:
 Use `app.py` to view your attendance records by selecting a specific date.
-python app.py
+***`python app.py`***
 
 
 ## Contributing
