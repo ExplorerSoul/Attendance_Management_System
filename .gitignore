@@ -1,5 +1,6 @@
-data/
-media/
-requirements/
-dlib/
-web server/
+data
+media
+requirements
+dlib
+web server
+attendance.db
