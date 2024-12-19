@@ -41,6 +41,22 @@ If you are using Windows, you may need to install Dlib from the provided `.whl` 
 `pip install resources/dlib-<version>.whl` # Replace <version> with the actual file name
 
 
+## Download Necessary Files
+
+To run the code in this project, you will need to download the necessary files from Google Drive. Click the link below to access the files:
+
+[Download Required Files](https://drive.google.com/drive/folders/1MJ86CfAg3ZfjAhHwn8-BoqdpIqsxah25?usp=sharing)
+
+### Instructions
+
+1. Click the link above to open the Google Drive folder.
+2. Download all files by selecting them and clicking on the download icon.
+3. Place the downloaded files in the appropriate directory as specified in the project documentation.
+
+If you encounter any issues while downloading or running the code, please refer to the troubleshooting section or open an issue on this repository.
+
+
+
 ## Usage
 
 1. **Register New Faces**:
