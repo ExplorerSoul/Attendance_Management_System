@@ -2,6 +2,8 @@
 
 This project implements a facial recognition attendance system using Python. It allows users to register new faces, recognize them in real-time, and log attendance based on facial recognition. The system provides a user-friendly interface for managing attendance records.
 
+[See Documentation](https://drive.google.com/file/d/1BalhebrMirvQu5oJI2qIiEAQL4sq280w/view?usp=sharing)
+
 ## Project Structure
 
 - **main.py**: This script is used to register new faces and capture images.
