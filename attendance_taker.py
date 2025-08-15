@@ -1,338 +1,263 @@
-import dlib
+"""
+attendance_taker.py
+MySQL + class-enabled face recognition attendance script.
+"""
+
 import numpy as np
 import cv2
 import os
 import pandas as pd
 import time
 import logging
-import sqlite3
 import datetime
+from collections import deque, defaultdict
+from db_config import get_connection
+
+from config import (
+    CSV_PATH, FRAME_SIZE, CAMERA_INDEX,
+    MIN_CONSEC_MATCHES, REQUIRE_BLINK_BEFORE_MARK, BLINK_VALID_WINDOW_SEC
+)
+from face_utils import detect_faces, compute_embedding, image_quality_ok, compare_distance
+from liveness import ear_from_shape  # safer EAR
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# Dlib  / Use frontal face detector of Dlib
-detector = dlib.get_frontal_face_detector()
-
-# Dlib landmark / Get face landmarks
-predictor = dlib.shape_predictor('data/data_dlib/shape_predictor_68_face_landmarks.dat')
-
-# Dlib Resnet Use Dlib resnet50 model to get 128D face descriptor
-face_reco_model = dlib.face_recognition_model_v1("data/data_dlib/dlib_face_recognition_resnet_model_v1.dat")
-
-# Create a connection to the database
-conn = sqlite3.connect("attendance.db")
-cursor = conn.cursor()
-
-# Create a table for the current date
-current_date = datetime.datetime.now().strftime("%Y_%m_%d")  # Replace hyphens with underscores
-table_name = "attendance" 
-create_table_sql = f"CREATE TABLE IF NOT EXISTS {table_name} (name TEXT, time TEXT, date DATE, UNIQUE(name, date))"
-cursor.execute(create_table_sql)
-
-
-# Commit changes and close the connection
-conn.commit()
-conn.close()
-
-
-class Face_Recognizer:
-    def __init__(self):
+class FaceRecognizer:
+    def __init__(self, class_id: int):
+        self.class_id = int(class_id)
         self.font = cv2.FONT_ITALIC
-
-        # FPS
-        self.frame_time = 0
-        self.frame_start_time = 0
-        self.fps = 0
-        self.fps_show = 0
-        self.start_time = time.time()
-
-        # cnt for frame
         self.frame_cnt = 0
 
-        #  Save the features of faces in the database
+        # Known face data
         self.face_features_known_list = []
-        # / Save the name of faces in the database
+        self.face_roll_no_known_list = []
         self.face_name_known_list = []
 
-        #  List to save centroid positions of ROI in frame N-1 and N
-        self.last_frame_face_centroid_list = []
-        self.current_frame_face_centroid_list = []
+        # Matching & blink tracking
+        self.match_streaks = defaultdict(int)
+        self.last_blink_time = 0
+        self.ear_queue = deque(maxlen=12)
+        self.blinks_total = 0
+        self._below_count = 0
 
-        # List to save names of objects in frame N-1 and N
-        self.last_frame_face_name_list = []
-        self.current_frame_face_name_list = []
+        # Prevent duplicate marks in a session
+        self.marked_today = set()
 
-        #  cnt for faces in frame N-1 and N
-        self.last_frame_face_cnt = 0
-        self.current_frame_face_cnt = 0
+        # FPS calculation
+        self.last_time = time.time()
+        self.fps = 0.0
 
-        # Save the e-distance for faceX when recognizing
-        self.current_frame_face_X_e_distance_list = []
+        # Last mark message for display
+        self.last_mark_message = ""
+        self.last_mark_time = 0
 
-        # Save the positions and names of current faces captured
-        self.current_frame_face_position_list = []
-        #  Save the features of people in current frame
-        self.current_frame_face_feature_list = []
+    def get_face_database(self) -> bool:
+        """Load features from CSV_PATH into memory."""
+        if not os.path.exists(CSV_PATH):
+            logging.warning("CSV_PATH does not exist: %s", CSV_PATH)
+            return False
+        try:
+            df = pd.read_csv(CSV_PATH)
+            if not {'Roll_No', 'Name'}.issubset(df.columns):
+                logging.warning("CSV missing Roll_No/Name columns: %s", CSV_PATH)
+                return False
 
-        # e distance between centroid of ROI in last and current frame
-        self.last_current_frame_centroid_e_distance = 0
+            self.face_roll_no_known_list = df['Roll_No'].astype(str).tolist()
+            self.face_name_known_list = df['Name'].astype(str).tolist()
+            feats = df.drop(columns=['Roll_No', 'Name'])
 
-        #  Reclassify after 'reclassify_interval' frames
-        self.reclassify_interval_cnt = 0
-        self.reclassify_interval = 10
+            if feats.empty:
+                logging.warning("Features CSV found but no embeddings present.")
+                self.face_features_known_list = []
+                return True
 
-    #  "features_all.csv"  / Get known faces from "features_all.csv"
-    def get_face_database(self):
-        if os.path.exists("data/features_all.csv"):
-            path_features_known_csv = "data/features_all.csv"
-            csv_rd = pd.read_csv(path_features_known_csv, header=None)
-            for i in range(csv_rd.shape[0]):
-                features_someone_arr = []
-                self.face_name_known_list.append(csv_rd.iloc[i][0])
-                for j in range(1, 129):
-                    if csv_rd.iloc[i][j] == '':
-                        features_someone_arr.append('0')
-                    else:
-                        features_someone_arr.append(csv_rd.iloc[i][j])
-                self.face_features_known_list.append(features_someone_arr)
-            logging.info("Faces in Database： %d", len(self.face_features_known_list))
-            return 1
-        else:
-            logging.warning("'features_all.csv' not found!")
-            logging.warning("Please run 'get_faces_from_camera.py' "
-                            "and 'features_extraction_to_csv.py' before 'face_reco_from_camera.py'")
-            return 0
+            self.face_features_known_list = feats.values.astype(np.float32)
+            logging.info("Loaded %d embeddings from %s", len(self.face_features_known_list), CSV_PATH)
+            return True
+        except Exception as e:
+            logging.exception("Error reading CSV_PATH: %s", e)
+            return False
 
     def update_fps(self):
         now = time.time()
-        # Refresh fps per second
-        if str(self.start_time).split(".")[0] != str(now).split(".")[0]:
-            self.fps_show = self.fps
-        self.start_time = now
-        self.frame_time = now - self.frame_start_time
-        self.fps = 1.0 / self.frame_time
-        self.frame_start_time = now
+        dt = now - self.last_time
+        if dt > 0:
+            self.fps = 1.0 / dt
+        self.last_time = now
 
-    @staticmethod
-    # / Compute the e-distance between two 128D features
-    def return_euclidean_distance(feature_1, feature_2):
-        feature_1 = np.array(feature_1)
-        feature_2 = np.array(feature_2)
-        dist = np.sqrt(np.sum(np.square(feature_1 - feature_2)))
-        return dist
+    def draw_hud(self, img):
+        cv2.putText(img, f"Frames: {self.frame_cnt}", (20, 40), self.font, 0.7, (255, 255, 255), 1)
+        cv2.putText(img, f"FPS: {self.fps:.1f}", (20, 65), self.font, 0.7, (0, 255, 0), 1)
+        cv2.putText(img, f"Blinks: {self.blinks_total}", (20, 90), self.font, 0.7, (0, 255, 255), 1)
+        cv2.putText(img, f"Class ID: {self.class_id}", (20, 115), self.font, 0.7, (255, 200, 0), 1)
+        cv2.putText(img, "Q: Quit", (20, 450), self.font, 0.8, (200, 200, 200), 1)
 
-    # / Use centroid tracker to link face_x in current frame with person_x in last frame
-    def centroid_tracker(self):
-        for i in range(len(self.current_frame_face_centroid_list)):
-            e_distance_current_frame_person_x_list = []
-            #  For object 1 in current_frame, compute e-distance with object 1/2/3/4/... in last frame
-            for j in range(len(self.last_frame_face_centroid_list)):
-                self.last_current_frame_centroid_e_distance = self.return_euclidean_distance(
-                    self.current_frame_face_centroid_list[i], self.last_frame_face_centroid_list[j])
+        # Display last mark message
+        if self.last_mark_message and (time.time() - self.last_mark_time < 3):
+            cv2.putText(img, self.last_mark_message, (20, 140), self.font, 0.7, (0, 255, 0), 2)
 
-                e_distance_current_frame_person_x_list.append(
-                    self.last_current_frame_centroid_e_distance)
-
-            last_frame_num = e_distance_current_frame_person_x_list.index(
-                min(e_distance_current_frame_person_x_list))
-            self.current_frame_face_name_list[i] = self.last_frame_face_name_list[last_frame_num]
-
-    #  cv2 window / putText on cv2 window
-    def draw_note(self, img_rd):
-        #  / Add some info on windows
-        cv2.putText(img_rd, "Face Recognizer with Deep Learning", (20, 40), self.font, 1, (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(img_rd, "Frame:  " + str(self.frame_cnt), (20, 100), self.font, 0.8, (0, 255, 0), 1,
-                    cv2.LINE_AA)
-        cv2.putText(img_rd, "FPS:    " + str(self.fps.__round__(2)), (20, 130), self.font, 0.8, (0, 255, 0), 1,
-                    cv2.LINE_AA)
-        cv2.putText(img_rd, "Faces:  " + str(self.current_frame_face_cnt), (20, 160), self.font, 0.8, (0, 255, 0), 1,
-                    cv2.LINE_AA)
-        cv2.putText(img_rd, "Q: Quit", (20, 450), self.font, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
-
-        for i in range(len(self.current_frame_face_name_list)):
-            img_rd = cv2.putText(img_rd, "Face_" + str(i + 1), tuple(
-                [int(self.current_frame_face_centroid_list[i][0]), int(self.current_frame_face_centroid_list[i][1])]),
-                                 self.font,
-                                 0.8, (255, 190, 0),
-                                 1,
-                                 cv2.LINE_AA)
-    # insert data in database
-
-    def attendance(self, name):
+    def mark_attendance(self, roll_no: str, name: str):
+        """Insert attendance row into MySQL and record visual notification."""
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
-        conn = sqlite3.connect("attendance.db")
-        cursor = conn.cursor()
-        # Check if the name already has an entry for the current date
-        cursor.execute("SELECT * FROM attendance WHERE name = ? AND date = ?", (name, current_date))
-        existing_entry = cursor.fetchone()
-
-        if existing_entry:
-            print(f"{name} is already marked as present for {current_date}")
-        else:
-            current_time = datetime.datetime.now().strftime('%H:%M:%S')
-            cursor.execute("INSERT INTO attendance (name, time, date) VALUES (?, ?, ?)", (name, current_time, current_date))
+        current_time = datetime.datetime.now().strftime('%H:%M:%S')
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO attendance (roll_no, name, class_id, time, date)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (roll_no, name, self.class_id, current_time, current_date))
             conn.commit()
-            print(f"{name} marked as present for {current_date} at {current_time}")
+            logging.info("✅ Attendance recorded for %s (%s) in class_id=%s", name, roll_no, self.class_id)
+            self.marked_today.add((roll_no, self.class_id))
+            self.last_mark_message = f"ATTENDANCE MARKED: {name} ({roll_no})"
+            self.last_mark_time = time.time()
+        except Exception as e:
+            logging.info("⚠️ Attendance insert error (likely already marked): %s", e)
+            self.last_mark_message = f"ALREADY MARKED / ERROR: {name} ({roll_no})"
+            self.last_mark_time = time.time()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
-        conn.close()
+    def process(self, cap):
+        if not self.get_face_database():
+            logging.error("Face DB not available or malformed. Run features_extraction_to_csv.py first.")
+            return
 
-    #  Face detection and recognition wit OT from input video stream
-    def process(self, stream):
-        # 1.  Get faces known from "features.all.csv"
-        if self.get_face_database():
-            while stream.isOpened():
+        try:
+            while cap.isOpened():
                 self.frame_cnt += 1
-                logging.debug("Frame " + str(self.frame_cnt) + " starts")
-                flag, img_rd = stream.read()
-                kk = cv2.waitKey(1)
-
-                # 2.  Detect faces for frame X
-                faces = detector(img_rd, 0)
-
-                # 3.  Update cnt for faces in frames
-                self.last_frame_face_cnt = self.current_frame_face_cnt
-                self.current_frame_face_cnt = len(faces)
-
-                # 4.  Update the face name list in last frame
-                self.last_frame_face_name_list = self.current_frame_face_name_list[:]
-
-                # 5.  update frame centroid list
-                self.last_frame_face_centroid_list = self.current_frame_face_centroid_list
-                self.current_frame_face_centroid_list = []
-
-                # 6.1  if cnt not changes
-                if (self.current_frame_face_cnt == self.last_frame_face_cnt) and (
-                        self.reclassify_interval_cnt != self.reclassify_interval):
-                    logging.debug("scene 1:   No face cnt changes in this frame!!!")
-
-                    self.current_frame_face_position_list = []
-
-                    if "unknown" in self.current_frame_face_name_list:
-                        self.reclassify_interval_cnt += 1
-
-                    if self.current_frame_face_cnt != 0:
-                        for k, d in enumerate(faces):
-                            self.current_frame_face_position_list.append(tuple(
-                                [faces[k].left(), int(faces[k].bottom() + (faces[k].bottom() - faces[k].top()) / 4)]))
-                            self.current_frame_face_centroid_list.append(
-                                [int(faces[k].left() + faces[k].right()) / 2,
-                                 int(faces[k].top() + faces[k].bottom()) / 2])
-
-                            img_rd = cv2.rectangle(img_rd,
-                                                   tuple([d.left(), d.top()]),
-                                                   tuple([d.right(), d.bottom()]),
-                                                   (255, 255, 255), 2)
-
-                    #  Multi-faces in current frame, use centroid-tracker to track
-                    if self.current_frame_face_cnt != 1:
-                        self.centroid_tracker()
-
-                    for i in range(self.current_frame_face_cnt):
-                        # 6.2 Write names under ROI
-                        img_rd = cv2.putText(img_rd, self.current_frame_face_name_list[i],
-                                             self.current_frame_face_position_list[i], self.font, 0.8, (0, 255, 255), 1,
-                                             cv2.LINE_AA)
-                    self.draw_note(img_rd)
-
-                # 6.2  If cnt of faces changes, 0->1 or 1->0 or ...
-                else:
-                    logging.debug("scene 2: / Faces cnt changes in this frame")
-                    self.current_frame_face_position_list = []
-                    self.current_frame_face_X_e_distance_list = []
-                    self.current_frame_face_feature_list = []
-                    self.reclassify_interval_cnt = 0
-
-                    # 6.2.1  Face cnt decreases: 1->0, 2->1, ...
-                    if self.current_frame_face_cnt == 0:
-                        logging.debug("  / No faces in this frame!!!")
-                        # clear list of names and features
-                        self.current_frame_face_name_list = []
-                    # 6.2.2 / Face cnt increase: 0->1, 0->2, ..., 1->2, ...
-                    else:
-                        logging.debug("  scene 2.2  Get faces in this frame and do face recognition")
-                        self.current_frame_face_name_list = []
-                        for i in range(len(faces)):
-                            shape = predictor(img_rd, faces[i])
-                            self.current_frame_face_feature_list.append(
-                                face_reco_model.compute_face_descriptor(img_rd, shape))
-                            self.current_frame_face_name_list.append("unknown")
-
-                        # 6.2.2.1 Traversal all the faces in the database
-                        for k in range(len(faces)):
-                            logging.debug("  For face %d in current frame:", k + 1)
-                            self.current_frame_face_centroid_list.append(
-                                [int(faces[k].left() + faces[k].right()) / 2,
-                                 int(faces[k].top() + faces[k].bottom()) / 2])
-
-                            self.current_frame_face_X_e_distance_list = []
-
-                            # 6.2.2.2  Positions of faces captured
-                            self.current_frame_face_position_list.append(tuple(
-                                [faces[k].left(), int(faces[k].bottom() + (faces[k].bottom() - faces[k].top()) / 4)]))
-
-                            # 6.2.2.3 
-                            # For every faces detected, compare the faces in the database
-                            for i in range(len(self.face_features_known_list)):
-                                # 
-                                if str(self.face_features_known_list[i][0]) != '0.0':
-                                    e_distance_tmp = self.return_euclidean_distance(
-                                        self.current_frame_face_feature_list[k],
-                                        self.face_features_known_list[i])
-                                    logging.debug("      with person %d, the e-distance: %f", i + 1, e_distance_tmp)
-                                    self.current_frame_face_X_e_distance_list.append(e_distance_tmp)
-                                else:
-                                    #  person_X
-                                    self.current_frame_face_X_e_distance_list.append(999999999)
-
-                            # 6.2.2.4 / Find the one with minimum e distance
-                            similar_person_num = self.current_frame_face_X_e_distance_list.index(
-                                min(self.current_frame_face_X_e_distance_list))
-
-                            if min(self.current_frame_face_X_e_distance_list) < 0.4:
-                                self.current_frame_face_name_list[k] = self.face_name_known_list[similar_person_num]
-                                logging.debug("  Face recognition result: %s",
-                                              self.face_name_known_list[similar_person_num])
-                                
-                                # Insert attendance record
-                                nam =self.face_name_known_list[similar_person_num]
-
-                                print(type(self.face_name_known_list[similar_person_num]))
-                                print(nam)
-                                self.attendance(nam)
-                            else:
-                                logging.debug("  Face recognition result: Unknown person")
-
-                        # 7.  / Add note on cv2 window
-                        self.draw_note(img_rd)
-
-                # 8.  'q'  / Press 'q' to exit
-                if kk == ord('q'):
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    logging.warning("No camera frame returned; stopping.")
                     break
 
+                frame_bgr = cv2.resize(frame_bgr, FRAME_SIZE)
+                img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                faces = detect_faces(img_rgb)
+                names_to_draw = []
+                ear_val = None
+
+                for rect in faces:
+                    try:
+                        if not image_quality_ok(img_rgb, rect):
+                            cv2.rectangle(frame_bgr, (rect.left(), rect.top()), (rect.right(), rect.bottom()), (0, 0, 255), 2)
+                            cv2.putText(frame_bgr, "LOW QUALITY", (rect.left(), max(20, rect.top() - 10)), self.font, 0.6, (0, 0, 255), 1)
+                            continue
+
+                        emb, shape, aligned = compute_embedding(img_rgb, rect)
+                        ear_val = ear_from_shape(shape)
+
+                        # Default match
+                        best_name, best_roll, best_d, best_thr = "Unknown", None, float('inf'), None
+
+                        if len(self.face_features_known_list) > 0:
+                            for idx, known in enumerate(self.face_features_known_list):
+                                d, thr = compare_distance(emb, known)
+                                if d < best_d:
+                                    best_d = d
+                                    best_roll = self.face_roll_no_known_list[idx]
+                                    best_name = self.face_name_known_list[idx]
+                                    best_thr = thr
+
+                        cv2.rectangle(frame_bgr, (rect.left(), rect.top()), (rect.right(), rect.bottom()), (255, 255, 255), 2)
+                        is_match = (best_thr is not None) and (best_d < best_thr)
+                        display = f"Unknown ({best_d:.3f})"
+
+                        if is_match and best_roll:
+                            self.match_streaks[best_roll] += 1
+                            display = f"{best_name} [{best_roll}] ({best_d:.3f})"
+                            can_mark = self.match_streaks[best_roll] >= MIN_CONSEC_MATCHES
+                            if REQUIRE_BLINK_BEFORE_MARK:
+                                can_mark = can_mark and (time.time() - self.last_blink_time) <= BLINK_VALID_WINDOW_SEC
+                            if can_mark and ((best_roll, self.class_id) not in self.marked_today):
+                                self.mark_attendance(best_roll, best_name)
+                                self.match_streaks[best_roll] = 0
+                        else:
+                            if best_roll:
+                                self.match_streaks[best_roll] = 0
+
+                        names_to_draw.append((display, (rect.left(), rect.bottom() + 20)))
+                    except Exception as face_e:
+                        logging.exception("Error processing face: %s", face_e)
+
+                # Blink tracking
+                if ear_val is not None:
+                    self.ear_queue.append(ear_val)
+                    from config import EAR_BLINK_THRESHOLD, EAR_CONSEC_FRAMES
+                    if ear_val < EAR_BLINK_THRESHOLD:
+                        self._below_count += 1
+                    else:
+                        if self._below_count >= EAR_CONSEC_FRAMES:
+                            self.blinks_total += 1
+                            self.last_blink_time = time.time()
+                        self._below_count = 0
+
+                # Draw labels
+                for name, pos in names_to_draw:
+                    cv2.putText(frame_bgr, name, pos, self.font, 0.7, (0, 255, 255), 1)
+
+                self.draw_hud(frame_bgr)
+                cv2.imshow("camera", frame_bgr)
                 self.update_fps()
-                cv2.namedWindow("camera", 1)
-                cv2.imshow("camera", img_rd)
 
-                logging.debug("Frame ends\n\n")
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    logging.info("Quit key pressed.")
+                    break
 
-    
-
+        except KeyboardInterrupt:
+            logging.info("Stopped by user.")
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()
 
     def run(self):
-        # cap = cv2.VideoCapture("video.mp4")  # Get video stream from video file
-        cap = cv2.VideoCapture(0)              # Get video stream from camera
+        cap = cv2.VideoCapture(CAMERA_INDEX)
+        if not cap.isOpened():
+            logging.error("Failed to open camera index %s", CAMERA_INDEX)
+            return
         self.process(cap)
 
-        cap.release()
-        cv2.destroyAllWindows()
-    
-   
+
+def choose_class() -> int:
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT class_id, class_name FROM classes ORDER BY class_id")
+        classes = cursor.fetchall()
+        if not classes:
+            raise RuntimeError("No classes found. Run init_db first.")
+
+        print("\nAvailable Classes:")
+        for cid, cname in classes:
+            print(f"{cid}: {cname}")
+
+        while True:
+            choice = input("Enter class ID to take attendance for (or 'q' to quit): ").strip()
+            if choice.lower() == 'q':
+                raise SystemExit(0)
+            try:
+                cid = int(choice)
+                if any(cid == row[0] for row in classes):
+                    return cid
+                print("Invalid class id, try again.")
+            except ValueError:
+                print("Please enter a numeric class id.")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def main():
-    # logging.basicConfig(level=logging.DEBUG) # Set log level to 'logging.DEBUG' to print debug info of every frame
-    logging.basicConfig(level=logging.INFO)
-    Face_Recognizer_con = Face_Recognizer()
-    Face_Recognizer_con.run()
+    class_id = choose_class()
+    FaceRecognizer(class_id).run()
 
 
 if __name__ == '__main__':

@@ -3,4 +3,22 @@ media
 requirements
 dlib
 web server
-attendance.db
+.env
+ca.pem
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Virtual environment
+venv/
+.env/
+
+test.py
