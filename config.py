@@ -4,26 +4,57 @@ Now loads sensitive values from .env using python-dotenv for security.
 """
 
 import os
+import certifi
 from dotenv import load_dotenv
 
 # Load .env variables
 load_dotenv()
 
-# --- MySQL Database Config ---
+# --- Valkey (Message Queue) Configuration ---
+# Use the details from your Aiven for Valkey™ service Overview page
+VALKEY_CONFIG = {
+    'host': os.getenv('VALKEY_HOST'),
+    'port': int(os.getenv('VALKEY_PORT', 12345)),
+    'password': os.getenv('VALKEY_PASSWORD'),
+    # Aiven requires SSL connection
+    'ssl_cert_reqs': 'required',
+    'ssl_ca_certs': os.getenv("VALKEY_SSL_CA") # Use system CAs from certifi package
+}
+
+# Fail fast if any critical Valkey config is missing
+required_valkey_keys = ["host", "password"]
+for key in required_valkey_keys:
+    if not VALKEY_CONFIG.get(key):
+        raise RuntimeError(f"❌ Missing Valkey config key: {key}. Check your .env file.")
+
+# Valkey Stream parameters
+VALKEY_STREAM_NAME = 'attendance_stream'
+VALKEY_GROUP_NAME = 'attendance_writers'
+VALKEY_CONSUMER_NAME = 'worker_1' # Unique name for this consumer instance
+
+# --- MySQL Database Configuration ---
+# Use the details from your Aiven for MySQL® service Overview page
 MYSQL_CONFIG = {
-    "host": os.getenv("MYSQL_HOST"),
-    "port": int(os.getenv("MYSQL_PORT")),
-    "user": os.getenv("MYSQL_USER"),
-    "password": os.getenv("MYSQL_PASS"),
-    "database": os.getenv("MYSQL_DB"),
-    "ssl_ca": os.getenv("MYSQL_SSL_CA"),  # Optional
+    'host': os.getenv("MYSQL_HOST"),
+    'port': int(os.getenv("MYSQL_PORT")),
+    'user': os.getenv("MYSQL_USER"),
+    'password': os.getenv("MYSQL_PASS"),
+    'database': os.getenv("MYSQL_DB"),
+    # Aiven requires SSL connection. You must download the CA file and reference it here.
+    # Note: Using certifi.where() for simplicity, but for Aiven you may need the specific file path
+    # If using Aiven's provided CA file: 'ssl_ca': '/path/to/your/aiven_ca.pem',
+    'ssl_ca': os.getenv("MYSQL_SSL_CA"),
+    'ssl_verify_cert': True,
+    'ssl_verify_identity': True,
+    'connection_timeout': 10
 }
 
 # Fail fast if any critical DB config is missing
 required_keys = ["host", "user", "password", "database"]
 for key in required_keys:
-    if not MYSQL_CONFIG[key]:
+    if not MYSQL_CONFIG.get(key):
         raise RuntimeError(f"❌ Missing MySQL config key: {key}. Check your .env file.")
+
 
 # --- Models ---
 DLIB_LANDMARK_PATH = 'data/data_dlib/shape_predictor_68_face_landmarks.dat'

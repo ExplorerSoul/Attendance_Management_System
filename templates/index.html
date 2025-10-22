@@ -5,17 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Attendance Dashboard</title>
 
-  <!-- Bootstrap -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/css/bootstrap.min.css" rel="stylesheet">
-  <!-- DataTables -->
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/dataTables.bootstrap5.min.css">
 
   <style>
+    /*
+      FIXED CSS: Removed unused .top-cards class from selector
+      and applied the shadow to the specific cards in the layout.
+    */
     body { background: #f5f7fb; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
-    .top-cards .card { border-radius: 12px; box-shadow: 0 6px 18px rgba(22,22,60,0.06); }
+
+    /* Apply shadow to the main filter box and the export card */
+    .filter-box, .col-lg-3 .card {
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(22,22,60,0.06);
+      border: none; /* Add border: none for a cleaner look */
+    }
+
+    /* Apply shadow to the class overview cards */
+    .class-overview-card {
+        border-radius: 12px;
+        box-shadow: 0 6px 18px rgba(22,22,60,0.06);
+        border: none;
+    }
+
     .filter-box { background: #fff; padding: 12px; border-radius: 10px; }
     .chart-card { height: 240px; }
     .pointer { cursor:pointer; }
+
+    /* Improve table card look */
+    .student-table-card {
+        border-radius: 12px;
+        box-shadow: 0 6px 18px rgba(22,22,60,0.06);
+        border: none;
+    }
   </style>
 </head>
 <body>
@@ -31,7 +54,6 @@
       </div>
     </header>
 
-    <!-- Filters + Export -->
     <div class="row g-3 mb-3">
       <div class="col-lg-9">
         <div class="card p-3 filter-box">
@@ -77,18 +99,16 @@
           </div>
 
           <div class="mt-3">
-            <!-- Export as CSV button triggers query GET to /export_csv -->
             <button id="exportCsvBtn" class="btn btn-outline-primary w-100">Export CSV</button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Class overview -->
     <div class="row g-3 mb-3">
       {% for cid, cname, total_sessions, total_attendances, avg_pct in class_overview %}
         <div class="col-md-4">
-          <div class="card p-3 h-100">
+          <div class="card p-3 h-100 class-overview-card">
             <div class="d-flex justify-content-between">
               <div>
                 <div class="small text-muted">Class</div>
@@ -109,8 +129,7 @@
       {% endfor %}
     </div>
 
-    <!-- Student table -->
-    <div class="card p-3">
+    <div class="card p-3 student-table-card">
       <div class="d-flex justify-content-between align-items-center mb-3">
         <h5 class="mb-0">Student Attendance (%)</h5>
         <div class="small text-muted">Click a row to view detailed dates</div>
@@ -151,7 +170,6 @@
     </footer>
   </div>
 
-  <!-- Student details modal -->
   <div class="modal fade" id="studentModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg">
       <div class="modal-content">
@@ -172,55 +190,59 @@
     </div>
   </div>
 
-  <!-- Scripts -->
   <script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/js/bootstrap.bundle.min.js"></script>
 
-  <!-- DataTables -->
   <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
   <script src="https://cdn.datatables.net/1.13.4/js/dataTables.bootstrap5.min.js"></script>
 
-  <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
 
   <script>
+    // Improved Chart.js and Modal Logic
     $(document).ready(function() {
-      // DataTable
+
+      // 1. Initialize DataTable
       var table = $('#studentTable').DataTable({
         "order": [[4, "desc"]],
         "pageLength": 25,
         "lengthMenu": [10, 25, 50, 100]
       });
 
-      // Row click -> student details modal
+      // 2. Student Modal/Row Click
       $('#studentTable tbody').on('click', 'tr.student-row', function() {
         var roll = $(this).data('roll');
         if (!roll) return;
-        $('#studentDetailsHeader').text('Roll: ' + roll);
+
+        // Show loading state and open modal immediately
+        $('#studentDetailsHeader').html('Roll No: <b>' + roll + '</b>, Name: <b>' + $(this).find('td:eq(1)').text() + '</b>');
         $('#studentDetailsBody').html('<tr><td colspan="3">Loading...</td></tr>');
+        var studentModal = new bootstrap.Modal(document.getElementById('studentModal'));
+        studentModal.show();
+
         var date_from = $('#dateFrom').val();
         var date_to = $('#dateTo').val();
+
+        // Fetch data
         $.getJSON('/student/' + encodeURIComponent(roll) + '/attendance', {date_from: date_from, date_to: date_to})
           .done(function(data) {
             if (!data || data.length === 0) {
-              $('#studentDetailsBody').html('<tr><td colspan="3">No records found.</td></tr>');
+              $('#studentDetailsBody').html('<tr><td colspan="3">No records found within the selected date range.</td></tr>');
             } else {
               var html = '';
               data.forEach(function(r) {
-                html += '<tr><td>' + r.date + '</td><td>' + r.class_name + '</td><td>' + (r.time || '') + '</td></tr>';
+                // Ensure r.time is handled correctly, displaying 'N/A' if null/empty
+                var time_display = r.time ? r.time : 'N/A';
+                html += '<tr><td>' + r.date + '</td><td>' + r.class_name + '</td><td>' + time_display + '</td></tr>';
               });
               $('#studentDetailsBody').html(html);
             }
-            var modal = new bootstrap.Modal(document.getElementById('studentModal'));
-            modal.show();
           }).fail(function() {
-            $('#studentDetailsBody').html('<tr><td colspan="3">Failed to fetch details.</td></tr>');
-            var modal = new bootstrap.Modal(document.getElementById('studentModal'));
-            modal.show();
+            $('#studentDetailsBody').html('<tr><td colspan="3" class="text-danger">Failed to fetch details from the server.</td></tr>');
           });
       });
 
-      // Export CSV button builds query params and navigates to /export_csv
+      // 3. Export CSV button
       $('#exportCsvBtn').on('click', function() {
         var class_id = $('#classSelect').val() || '';
         var date_from = $('#dateFrom').val() || '';
@@ -229,14 +251,23 @@
         window.location = '/export_csv?' + params;
       });
 
-      // Build charts for each class canvas
+      // 4. Build Charts for each class
       document.querySelectorAll('canvas[id^="chart-"]').forEach(function(c) {
         var classId = c.dataset.classId;
         var date_from = $('#dateFrom').val() || '';
         var date_to = $('#dateTo').val() || '';
+
         fetch('/class_trend/' + classId + '?date_from=' + encodeURIComponent(date_from) + '&date_to=' + encodeURIComponent(date_to))
-          .then(r => r.json())
+          .then(r => {
+            if (!r.ok) throw new Error('Network response was not ok');
+            return r.json();
+          })
           .then(json => {
+            if (!json || json.data.length === 0) {
+                 // Optionally display a message on the canvas if no data
+                 return;
+            }
+
             var ctx = c.getContext('2d');
             new Chart(ctx, {
               type: 'line',
@@ -253,16 +284,22 @@
                 }]
               },
               options: {
+                responsive: true,
+                maintainAspectRatio: false,
                 plugins: { legend: { display: false }},
                 scales: {
                   x: { display: true, title: { display: false } },
-                  y: { beginAtZero: true, precision: 0 }
+                  y: {
+                      beginAtZero: true,
+                      precision: 0,
+                      // Ensure the max value is slightly higher than the max data point
+                      suggestedMax: Math.max(...json.data) + 1
+                  }
                 }
               }
             });
           }).catch(err => {
-            // no data or error -> draw nothing
-            console.error('chart err', err);
+            console.error('Chart loading error for class ' + classId + ':', err);
           });
       });
     });
