@@ -1,12 +1,19 @@
+import os
 from flask import Flask, request, jsonify
 from datetime import datetime
 import redis
 import json
 import ssl
 import time
+import logging  # Added logging
 from config import VALKEY_CONFIG, VALKEY_STREAM_NAME
 
+# Set up logging for the producer
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Flask Initialization ---
 app = Flask(__name__)
+
 
 # --- Valkey Client Initialization ---
 def get_valkey_client():
@@ -20,13 +27,15 @@ def get_valkey_client():
             ssl=True,
             ssl_cert_reqs=ssl.CERT_REQUIRED,
             ssl_ca_certs=VALKEY_CONFIG['ssl_ca_certs'],
-            decode_responses=False # Keep stream data as bytes for efficiency
+            decode_responses=False  # Keep stream data as bytes for efficiency
         )
         r.ping()
+        logging.info(" [VALKEY] Producer client connected successfully.")
         return r
     except Exception as e:
-        print(f" [!] Valkey connection failed: {e}")
+        logging.error(f" [!] Valkey connection failed: {e}")
         return None
+
 
 # Global Valkey client instance
 valkey_client = get_valkey_client()
@@ -41,7 +50,7 @@ def log_attendance():
     if valkey_client is None or not valkey_client.ping():
         valkey_client = get_valkey_client()
         if valkey_client is None:
-             # Critical failure, cannot queue message
+            # Critical failure, cannot queue message
             return jsonify({'status': 'error', 'message': 'Queue service unavailable'}), 503
 
     try:
@@ -63,18 +72,28 @@ def log_attendance():
         message_id = valkey_client.xadd(
             name=VALKEY_STREAM_NAME,
             fields=payload,
-            maxlen=1000000, # Cap stream to 1 million entries
+            maxlen=1000000,  # Cap stream to 1 million entries
             approximate=True
         )
-        print(f" [x] Sent message ID: {message_id.decode()} for Roll No: {roll_no}")
+        logging.info(" [x] Sent message ID: %s for Roll No: %s", message_id.decode(), roll_no)
 
         # Respond immediately to the device for maximum speed
         return jsonify({'status': 'success', 'message': 'Attendance queued'}), 202
 
     except Exception as e:
-        print(f" [!] Error during attendance processing: {e}")
+        logging.error(f" [!] Error during attendance processing: {e}")
         return jsonify({'status': 'error', 'message': 'Internal queueing error'}), 500
 
+
 if __name__ == '__main__':
-    # Run the producer service, perhaps on a separate port or machine from the consumer
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    host = os.getenv("HOST", "127.0.0.1")
+    # FIX: Use port 5001 to avoid conflict with the Dashboard Server (app.py)
+    port = int(os.getenv("PORT", 5001))
+    debug_mode = os.getenv("FLASK_DEBUG", "True").lower() in ("1", "true")
+
+    logging.info("=" * 60)
+    logging.info(f"PRODUCER SERVICE URL: http://{host}:{port}/api/v1/log_attendance")
+    logging.info("=" * 60)
+
+    # Run the producer service
+    app.run(host=host, port=port, debug=debug_mode)

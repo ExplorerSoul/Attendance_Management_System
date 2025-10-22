@@ -1,6 +1,7 @@
 """
 attendance_taker.py
-MySQL + class-enabled face recognition attendance script.
+Class-enabled face recognition attendance script. Now publishes attendance
+to the Producer Service API, routing all marks through the Valkey queue.
 """
 
 import numpy as np
@@ -11,7 +12,7 @@ import time
 import logging
 import datetime
 from collections import deque, defaultdict
-from db_config import get_connection
+import requests # New import for API calls
 
 from config import (
     CSV_PATH, FRAME_SIZE, CAMERA_INDEX,
@@ -19,8 +20,14 @@ from config import (
 )
 from face_utils import detect_faces, compute_embedding, image_quality_ok, compare_distance
 from liveness import ear_from_shape  # safer EAR
+from db_config import get_connection
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Configuration for Producer Service API ---
+# FIX: Changed invalid 127.0.0.0 to correct 127.0.0.1
+PRODUCER_API_URL = "http://127.0.0.1:5001/api/v1/log_attendance"
+# NOTE: Update 127.0.0.1 to your server's IP if running on separate machines
 
 
 class FaceRecognizer:
@@ -98,30 +105,33 @@ class FaceRecognizer:
             cv2.putText(img, self.last_mark_message, (20, 140), self.font, 0.7, (0, 255, 0), 2)
 
     def mark_attendance(self, roll_no: str, name: str):
-        """Insert attendance row into MySQL and record visual notification."""
-        current_date = datetime.datetime.now().strftime('%Y-%m-%d')
-        current_time = datetime.datetime.now().strftime('%H:%M:%S')
+        """Sends attendance data to the Producer Service API for queueing."""
+        # Use roll_no and class_id only, as name is looked up by the consumer
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO attendance (roll_no, name, class_id, time, date)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (roll_no, name, self.class_id, current_time, current_date))
-            conn.commit()
-            logging.info("✅ Attendance recorded for %s (%s) in class_id=%s", name, roll_no, self.class_id)
-            self.marked_today.add((roll_no, self.class_id))
-            self.last_mark_message = f"ATTENDANCE MARKED: {name} ({roll_no})"
+            payload = {
+                "roll_no": roll_no,
+                "class_id": self.class_id,
+            }
+
+            response = requests.post(PRODUCER_API_URL, json=payload, timeout=2) # Added timeout
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+            if response.status_code == 202:
+                logging.info("✅ Attendance sent to queue for %s (%s)", name, roll_no)
+                self.marked_today.add((roll_no, self.class_id))
+                self.last_mark_message = f"QUEUED: {name} ({roll_no})"
+            else:
+                logging.warning("⚠️ Queue API responded unexpectedly: %s", response.text)
+                self.last_mark_message = f"QUEUE ERROR: {response.status_code}"
+
             self.last_mark_time = time.time()
-        except Exception as e:
-            logging.info("⚠️ Attendance insert error (likely already marked): %s", e)
-            self.last_mark_message = f"ALREADY MARKED / ERROR: {name} ({roll_no})"
+
+        except requests.exceptions.RequestException as e:
+            # This handles connection errors, timeouts, etc.
+            logging.error("❌ Failed to connect to Producer API: %s", e)
+            self.last_mark_message = "API OFFLINE"
             self.last_mark_time = time.time()
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+
 
     def process(self, cap):
         if not self.get_face_database():
@@ -132,25 +142,41 @@ class FaceRecognizer:
             while cap.isOpened():
                 self.frame_cnt += 1
                 ret, frame_bgr = cap.read()
+
+                # --- FIX: Robust Frame Checks ---
                 if not ret:
-                    logging.warning("No camera frame returned; stopping.")
+                    logging.warning("No camera frame returned (ret=False); stopping.")
                     break
+
+                if frame_bgr is None or frame_bgr.size == 0 or frame_bgr.dtype != np.uint8:
+                    logging.warning("Captured frame is empty, corrupted, or not 8-bit unsigned integer type; skipping frame.")
+                    time.sleep(0.1)
+                    continue
+
+                if len(frame_bgr.shape) < 3:
+                    logging.warning("Frame does not have enough channels for BGR; skipping.")
+                    time.sleep(0.1)
+                    continue
+                # ----------------------------------------------
 
                 frame_bgr = cv2.resize(frame_bgr, FRAME_SIZE)
                 img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-                faces = detect_faces(img_rgb)
+                # FIX: Use np.ascontiguousarray to ensure dlib compatibility
+                img_rgb_contiguous = np.ascontiguousarray(img_rgb)
+
+                faces = detect_faces(img_rgb_contiguous)
                 names_to_draw = []
                 ear_val = None
 
                 for rect in faces:
                     try:
-                        if not image_quality_ok(img_rgb, rect):
+                        if not image_quality_ok(img_rgb_contiguous, rect):
                             cv2.rectangle(frame_bgr, (rect.left(), rect.top()), (rect.right(), rect.bottom()), (0, 0, 255), 2)
                             cv2.putText(frame_bgr, "LOW QUALITY", (rect.left(), max(20, rect.top() - 10)), self.font, 0.6, (0, 0, 255), 1)
                             continue
 
-                        emb, shape, aligned = compute_embedding(img_rgb, rect)
+                        emb, shape, aligned = compute_embedding(img_rgb_contiguous, rect)
                         ear_val = ear_from_shape(shape)
 
                         # Default match
@@ -176,8 +202,10 @@ class FaceRecognizer:
                             if REQUIRE_BLINK_BEFORE_MARK:
                                 can_mark = can_mark and (time.time() - self.last_blink_time) <= BLINK_VALID_WINDOW_SEC
                             if can_mark and ((best_roll, self.class_id) not in self.marked_today):
+                                # --- Action: Mark Attendance via API ---
                                 self.mark_attendance(best_roll, best_name)
                                 self.match_streaks[best_roll] = 0
+                                # ---------------------------------------
                         else:
                             if best_roll:
                                 self.match_streaks[best_roll] = 0
@@ -217,14 +245,41 @@ class FaceRecognizer:
             cv2.destroyAllWindows()
 
     def run(self):
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-        if not cap.isOpened():
-            logging.error("Failed to open camera index %s", CAMERA_INDEX)
-            return
-        self.process(cap)
+        # --- FIX: Robust Camera Initialization (Iterate over backends/indices) ---
+        INDEXES_TO_TRY = [CAMERA_INDEX, 0, 1]
+        BACKENDS_TO_TRY = [cv2.CAP_DSHOW, cv2.CAP_V4L2, cv2.CAP_ANY]
+
+        cap = None
+        for index in INDEXES_TO_TRY:
+            for backend in BACKENDS_TO_TRY:
+                try:
+                    cap = cv2.VideoCapture(index, backend)
+                    if cap.isOpened():
+                        # Read one frame to verify it's working
+                        ret, _ = cap.read()
+                        if ret:
+                            logging.info("Successfully opened camera %d using backend %s", index, backend)
+                            self.process(cap)
+                            return
+                        else:
+                            cap.release()
+                            cap = None
+                    else:
+                        cap.release()
+                        cap = None
+                except Exception:
+                    # Ignore errors for unsupported backends
+                    cap = None
+                    pass
+
+        logging.error("Failed to open camera after trying multiple indices and backends.")
+        return
 
 
 def choose_class() -> int:
+    from db_config import get_connection
+
+    conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -249,10 +304,8 @@ def choose_class() -> int:
             except ValueError:
                 print("Please enter a numeric class id.")
     finally:
-        try:
+        if conn:
             conn.close()
-        except Exception:
-            pass
 
 
 def main():
@@ -261,4 +314,12 @@ def main():
 
 
 if __name__ == '__main__':
+    # Ensure 'requests' is installed for the API call
+    try:
+        import requests
+    except ImportError:
+        print("\nFATAL ERROR: The 'requests' library is required for API communication.")
+        print("Please run: pip install requests")
+        exit(1)
+
     main()

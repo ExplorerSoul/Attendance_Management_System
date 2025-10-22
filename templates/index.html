@@ -8,11 +8,10 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/css/bootstrap.min.css" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/dataTables.bootstrap5.min.css">
 
+  <!-- CRITICAL: Socket.IO Client Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+
   <style>
-    /*
-      FIXED CSS: Removed unused .top-cards class from selector
-      and applied the shadow to the specific cards in the layout.
-    */
     body { background: #f5f7fb; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
 
     /* Apply shadow to the main filter box and the export card */
@@ -302,6 +301,35 @@
             console.error('Chart loading error for class ' + classId + ':', err);
           });
       });
+
+      // 5. Real-Time Socket.IO Logic
+      var socket = io.connect('http://' + document.domain + ':' + location.port);
+
+      socket.on('connect', function() {
+          console.log('Socket.IO Connected!');
+      });
+
+      socket.on('new_attendance_event', function(data) {
+          console.log('Real-time Attendance Event Received:', data);
+
+          // This triggers the visual notification and the full dashboard refresh
+          var rollNo = data.roll_no;
+          var notificationHtml = '<div id="rt-alert" class="alert alert-info alert-dismissible fade show" role="alert">' +
+                                 'New Attendance Marked (Roll No: <strong>' + rollNo + '</strong>)! Refreshing dashboard...' +
+                                 '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>' +
+                                 '</div>';
+          $('.container').prepend(notificationHtml);
+
+          // Use a short timeout to let the user see the notification before refreshing
+          setTimeout(function() {
+              // Remove the notification
+              $('#rt-alert').alert('close');
+
+              // Re-submit the filter form to fetch and re-render the updated data
+              $('#filterForm').submit(); // <-- THIS is the key line for the refresh
+          }, 3000);
+      });
+
     });
   </script>
 </body>

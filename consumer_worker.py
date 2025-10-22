@@ -4,6 +4,7 @@ import redis
 import time
 import json
 import ssl
+from datetime import datetime  # Import datetime class for parsing
 from config import VALKEY_CONFIG, MYSQL_CONFIG, VALKEY_STREAM_NAME, VALKEY_GROUP_NAME, VALKEY_CONSUMER_NAME
 
 
@@ -48,8 +49,6 @@ def process_messages(r, mysql_conn):
     """Reads messages, writes batch to DB, and ACKs them."""
 
     # 1. Read messages from the stream
-    # '>': Read new messages that haven't been delivered to any consumer yet
-    # block=10000: Wait up to 10 seconds for new messages before looping
     messages = r.xreadgroup(
         groupname=VALKEY_GROUP_NAME,
         consumername=VALKEY_CONSUMER_NAME,
@@ -59,47 +58,94 @@ def process_messages(r, mysql_conn):
     )
 
     if not messages:
-        # print(" [VALKEY] No new messages.")
         return
 
-    # messages structure: [[stream_name, [[id, data], [id, data], ...]]]
     stream_data = messages[0][1]
 
-    # Prepare batch insertion
+    # Prepare data structures
     records_to_insert = []
     message_ids_to_ack = []
 
+    # 1.1 Collect all roll numbers for batch name lookup
+    roll_numbers = []
     for msg_id, data in stream_data:
         try:
-            # Decode byte keys/values from Redis to string
             payload = {k.decode('utf-8'): v.decode('utf-8') for k, v in data.items()}
-
-            # Prepare data tuple for MySQL executemany
-            records_to_insert.append((
-                payload['roll_no'],
-                payload['class_id'],
-                payload['timestamp'],
-                payload['timestamp']
-            ))
+            roll_numbers.append(payload['roll_no'])
             message_ids_to_ack.append(msg_id)
         except Exception as e:
             print(f" [!!!] Failed to parse message ID {msg_id}: {e}. Skipping and NOT ACKNOWLEDGING.")
 
-    # 2. Write Batch to MySQL
+    if not roll_numbers:
+        return
+
+    # 2. Batch Lookup Student Names
+    name_lookup = {}
+    try:
+        cursor = mysql_conn.cursor()
+        # Create a placeholder string for the query: (%s, %s, ...)
+        placeholders = ', '.join(['%s'] * len(roll_numbers))
+
+        # Get names for all rolls in the current batch
+        lookup_query = f"SELECT roll_no, name FROM students WHERE roll_no IN ({placeholders})"
+        cursor.execute(lookup_query, roll_numbers)
+
+        for roll_no, name in cursor.fetchall():
+            name_lookup[roll_no] = name
+        cursor.close()
+    except mysql.connector.Error as e:
+        print(f" [!!!] MySQL Name Lookup FAILED: {e}. Cannot process batch.")
+        # Rollback is not strictly necessary here, but we exit the function without ACK
+        return
+
+    # 3. Prepare Batch Data for Insertion (Iterate over the stream data again)
+    for msg_id, data in stream_data:
+        try:
+            payload = {k.decode('utf-8'): v.decode('utf-8') for k, v in data.items()}
+            roll_no = payload['roll_no']
+
+            # --- FIX: Parse and format timestamp for MySQL DATE/TIME types ---
+            full_timestamp = payload['timestamp']
+
+            # Parse the ISO 8601 string into a datetime object
+            dt_object = datetime.fromisoformat(full_timestamp)
+
+            # Format to MySQL DATE ('YYYY-MM-DD') and TIME ('HH:MM:SS')
+            attendance_date = dt_object.strftime('%Y-%m-%d')
+            attendance_time = dt_object.strftime('%H:%M:%S')
+
+            student_name = name_lookup.get(roll_no, "Unknown Student")
+
+            # Prepare data tuple for MySQL executemany
+            records_to_insert.append((
+                roll_no,
+                student_name,  # Insert name from lookup
+                payload['class_id'],
+                attendance_time,
+                attendance_date
+            ))
+            # message_ids_to_ack is already populated
+
+        except Exception as e:
+            print(f" [!!!] Failed to process message ID {msg_id} during parsing: {e}. Skipping.")
+            # We don't remove the message ID from message_ids_to_ack yet, we handle failure in the next step
+
+    # 4. Write Batch to MySQL
     if records_to_insert:
         try:
             cursor = mysql_conn.cursor()
             # Ensure your table structure matches this INSERT statement
             insert_query = """
-            INSERT INTO attendance_records 
-            (roll_no, class_id, attendance_date, attendance_time)
-            VALUES (%s, %s, DATE(%s), TIME(%s))
+            INSERT INTO attendance
+            (roll_no, name, class_id, time, date)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE name=VALUES(name)
             """
             cursor.executemany(insert_query, records_to_insert)
             mysql_conn.commit()
             cursor.close()
 
-            # 3. Acknowledge messages only after successful DB commit
+            # 5. Acknowledge messages only after successful DB commit
             r.xack(VALKEY_STREAM_NAME, VALKEY_GROUP_NAME, *message_ids_to_ack)
             print(f" [SUCCESS] Committed {len(records_to_insert)} records and acknowledged messages.")
 

@@ -55,6 +55,27 @@ def _rect_from_dlib(rect):
 def detect_faces(img_rgb):
     """Detect faces and return list of dlib.rectangle."""
     _load_models()
+
+    # CRITICAL FIX: Ensure image is in the exact format dlib expects
+    # This handles cases where the array might not be C-contiguous
+    if not isinstance(img_rgb, np.ndarray):
+        raise ValueError("Input must be a numpy array")
+
+    # Ensure correct dtype
+    if img_rgb.dtype != np.uint8:
+        img_rgb = img_rgb.astype(np.uint8)
+
+    # Ensure C-contiguous memory layout
+    if not img_rgb.flags['C_CONTIGUOUS']:
+        img_rgb = np.ascontiguousarray(img_rgb)
+
+    # Validate shape (must be HxWx3 for RGB or HxW for grayscale)
+    if len(img_rgb.shape) == 3:
+        if img_rgb.shape[2] != 3:
+            raise ValueError(f"RGB image must have 3 channels, got {img_rgb.shape[2]}")
+    elif len(img_rgb.shape) != 2:
+        raise ValueError(f"Image must be 2D (grayscale) or 3D (RGB), got shape {img_rgb.shape}")
+
     results = detector(img_rgb, UPSAMPLE_DET)
     return [_rect_from_dlib(r) for r in results]
 
